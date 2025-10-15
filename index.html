@@ -8,18 +8,17 @@
     :root { --accent:#e31d1a; --link:#0a58ca; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; max-width: 860px; }
     h1 { font-size: 22px; margin: 0 0 16px; }
-    form { display:flex; gap:8px; margin: 0 0 16px; flex-wrap:wrap; }
+    form { display:flex; gap:8px; margin: 0 0 12px; flex-wrap:wrap; }
     input[type="text"] { flex:1; padding:10px 12px; font-size:16px; border:1px solid #d0d7de; border-radius:8px; }
-    select, button { padding:10px 12px; font-size:16px; border:1px solid #d0d7de; border-radius:8px; background:#fff; cursor:pointer; }
+    button { padding:10px 12px; font-size:16px; border:1px solid #d0d7de; border-radius:8px; background:#fff; cursor:pointer; }
     button.primary { background:#111; color:#fff; border-color:#111; }
-    #status { font-size:14px; color:#444; margin: 6px 0 16px; min-height: 18px; }
+    #status { font-size:14px; color:#444; margin: 6px 0 12px; min-height: 18px; }
     .preview { border:1px solid #e5e7eb; border-radius:12px; padding:16px; background:#fff; }
-    .controls { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
-    .code { margin-top:12px; border:1px solid #e5e7eb; border-radius:12px; padding:12px; background:#fafafa; max-height:360px; overflow:auto; font:12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space:pre; }
-    .hh-block h2 { font: 700 20px/1.2 Georgia, 'Times New Roman', Times, serif; margin:0 0 12px; }
-    .hh-item { border-left:4px solid var(--accent); padding-left:12px; margin:12px 0; }
+    .hh-block h2 { font: 700 20px/1.2 Georgia, 'Times New Roman', Times, serif; margin:0 0 10px; }
+    .hh-item { border-left:4px solid var(--accent); padding-left:12px; margin:10px 0; font-size:15px; line-height:1.35; }
     .hh-item a { color: var(--link); text-decoration: underline; }
-    .footer { white-space:nowrap; }
+    .footer { white-space:nowrap; font-size:14px; }
+    .controls { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
   </style>
 </head>
 <body>
@@ -27,11 +26,6 @@
 
   <form id="qform">
     <input id="q" type="text" placeholder="Player or Team — use commas for multiple (e.g., Jalen Brunson, New York Knicks)" required />
-    <select id="mode" title="Search mode">
-      <option value="any">Any mention</option>
-      <option value="player">Player</option>
-      <option value="team">Team</option>
-    </select>
     <button class="primary" type="submit">Generate</button>
     <button type="button" id="copyBtn" disabled>Copy HTML</button>
   </form>
@@ -41,33 +35,38 @@
   <div class="preview">
     <div id="preview" class="hh-block"></div>
     <div class="controls">
-      <button id="selectBtn" type="button" disabled>Select All</button>
+      <button id="selectBtn" type="button" disabled>Select Block</button>
     </div>
-    <pre id="out" class="code" aria-label="Generated HTML"></pre>
   </div>
 
 <script>
 const statusEl = document.querySelector('#status');
-const outEl = document.querySelector('#out');
 const previewEl = document.querySelector('#preview');
 const copyBtn = document.querySelector('#copyBtn');
 const selectBtn = document.querySelector('#selectBtn');
+const qInput = document.querySelector('#q');
 
 function esc(s){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
-// Format footer: "– <Source (linked)> | Oct. 15, 2025"
-function buildFooterHTML(sourceName, sourceUrl, datePretty) {
-  const src = sourceUrl ? `<a href="${sourceUrl}" target="_blank" rel="noopener">${esc(sourceName || 'Source')}</a>` : esc(sourceName || 'Source');
-  return ` &ndash; <span class="footer">${src} | ${esc(datePretty || '')}</span>`;
+// Footer: if suppressSource, show only date; else "<Source (link)> | Oct. 15, 2025"
+function buildFooterHTML(item) {
+  const date = esc(item.date_pretty || '');
+  if (item.suppressSource) {
+    return ` <span class="footer">| ${date}</span>`;
+  }
+  const src = item.sourceUrl
+    ? `<a href="${item.sourceUrl}" target="_blank" rel="noopener">${esc(item.sourceName || 'Source')}</a>`
+    : esc(item.sourceName || 'Source');
+  return ` <span class="footer">${src} | ${date}</span>`;
 }
 
 function buildPrestoHTML(subject, items){
   const heading = `More on ${esc(subject)}`;
   const paras = items.map(it => {
     const body = it.snippet_html || '';
-    const footer = buildFooterHTML(it.sourceName, it.sourceUrl, it.date_pretty);
+    const footer = buildFooterHTML(it);
     return `
-      <p class="hh-item" style="border-left:4px solid #e31d1a;padding-left:12px;margin:12px 0;">
+      <p class="hh-item" style="border-left:4px solid #e31d1a;padding-left:12px;margin:10px 0;font-size:15px;line-height:1.35;">
         ${body}${footer}
       </p>
     `.trim();
@@ -75,37 +74,34 @@ function buildPrestoHTML(subject, items){
 
   return `
 <div class="hh-block">
-  <h2 style="font-family:Georgia,'Times New Roman',Times,serif;font-weight:700;font-size:20px;line-height:1.2;margin:0 0 12px;">${heading}</h2>
+  <h2 style="font-family:Georgia,'Times New Roman',Times,serif;font-weight:700;font-size:20px;line-height:1.2;margin:0 0 10px;">${heading}</h2>
   ${paras}
 </div>`.trim();
 }
 
 async function fetchRumors(q){
-  const res = await fetch('/.netlify/functions/fetchRumors?q=' + encodeURIComponent(q) + '&debug=0');
+  const res = await fetch('/.netlify/functions/fetchRumors?q=' + encodeURIComponent(q));
   if(!res.ok) throw new Error('Fetch failed: ' + res.status);
   return await res.json();
 }
 
 function render(subject, items){
   const html = buildPrestoHTML(subject, items);
-  outEl.textContent = html;
   previewEl.innerHTML = html;
   copyBtn.disabled = false;
   selectBtn.disabled = false;
 }
 
-document.querySelector('#qform').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const q = document.querySelector('#q').value.trim();
-  // We ignore the dropdown now; multi-subject is supported by comma input
-  if(!q) return;
+async function run(){
+  const q = qInput.value.trim();
+  if(!q) { previewEl.innerHTML = ''; statusEl.textContent = ''; copyBtn.disabled = true; selectBtn.disabled = true; return; }
   statusEl.textContent = 'Fetching rumors…';
   copyBtn.disabled = true; selectBtn.disabled = true;
-  outEl.textContent = ''; previewEl.innerHTML = '';
   try {
     const data = await fetchRumors(q);
     if(!data.items || !data.items.length){
-      statusEl.textContent = 'No rumors found in the last few months for that input.';
+      statusEl.textContent = 'No rumors found for that input.';
+      previewEl.innerHTML = '';
       return;
     }
     statusEl.textContent = `Found ${data.items.length} item(s). Skipped the most recent.`;
@@ -114,20 +110,36 @@ document.querySelector('#qform').addEventListener('submit', async (e) => {
     console.error(err);
     statusEl.textContent = 'Error: ' + err.message;
   }
+}
+
+// Auto-generate on typing (debounced)
+let t;
+qInput.addEventListener('input', () => {
+  clearTimeout(t);
+  t = setTimeout(run, 500);
 });
 
+// Still allow manual submit/Enter
+document.querySelector('#qform').addEventListener('submit', (e) => {
+  e.preventDefault();
+  run();
+});
+
+// Copy the rendered block HTML (not the code)
 copyBtn.addEventListener('click', async () => {
+  const html = previewEl.innerHTML.trim();
   try {
-    await navigator.clipboard.writeText(outEl.textContent);
-    statusEl.textContent = 'Copied HTML to clipboard.';
+    await navigator.clipboard.writeText(html);
+    statusEl.textContent = 'Copied block HTML to clipboard.';
   } catch {
-    statusEl.textContent = 'Select the code and press Ctrl/Cmd+C.';
+    statusEl.textContent = 'Select the block and press Ctrl/Cmd+C.';
   }
 });
 
+// Select the rendered block for manual copy
 selectBtn.addEventListener('click', () => {
   const range = document.createRange();
-  range.selectNodeContents(outEl);
+  range.selectNode(previewEl);
   const sel = window.getSelection();
   sel.removeAllRanges();
   sel.addRange(range);
