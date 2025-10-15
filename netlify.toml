@@ -3,7 +3,6 @@
   publish = "."
 
 [functions]
-  # Option A: keep esbuild but copy jsdom from node_modules
   node_bundler = "esbuild"
   external_node_modules = ["jsdom"]
   included_files = ["node_modules/jsdom/**"]
