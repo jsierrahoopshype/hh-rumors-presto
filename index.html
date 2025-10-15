@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HoopsHype Rumors → Presto Block</title>
+  <style>
+    :root { --accent:#e31d1a; --link:#0a58ca; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; max-width: 860px; }
+    h1 { font-size: 22px; margin: 0 0 16px; }
+    form { display:flex; gap:8px; margin: 0 0 16px; flex-wrap:wrap; }
+    input[type="text"] { flex:1; padding:10px 12px; font-size:16px; border:1px solid #d0d7de; border-radius:8px; }
+    select, button { padding:10px 12px; font-size:16px; border:1px solid #d0d7de; border-radius:8px; background:#fff; cursor:pointer; }
+    button.primary { background:#111; color:#fff; border-color:#111; }
+    #status { font-size:14px; color:#444; margin: 6px 0 16px; min-height: 18px; }
+    .preview { border:1px solid #e5e7eb; border-radius:12px; padding:16px; background:#fff; }
+    .controls { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+    .code { margin-top:12px; border:1px solid #e5e7eb; border-radius:12px; padding:12px; background:#fafafa; max-height:360px; overflow:auto; font:12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space:pre; }
+    .hh-block h2 { font: 700 20px/1.2 Georgia, 'Times New Roman', Times, serif; margin:0 0 12px; }
+    .hh-item { border-left:4px solid var(--accent); padding-left:12px; margin:12px 0; }
+    .hh-item a { color: var(--link); text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>HoopsHype Rumors → Presto Block</h1>
+
+  <form id="qform">
+    <input id="q" type="text" placeholder="Player or Team (e.g., Jalen Brunson, Lakers)" required />
+    <select id="mode" title="Search mode">
+      <option value="player">Player</option>
+      <option value="team">Team</option>
+      <option value="any">Any mention</option>
+    </select>
+    <button class="primary" type="submit">Generate</button>
+    <button type="button" id="copyBtn" disabled>Copy HTML</button>
+  </form>
+
+  <div id="status"></div>
+
+  <div class="preview">
+    <div id="preview" class="hh-block"></div>
+    <div class="controls">
+      <button id="selectBtn" type="button" disabled>Select All</button>
+    </div>
+    <pre id="out" class="code" aria-label="Generated HTML"></pre>
+  </div>
+
+<script>
+const statusEl = document.querySelector('#status');
+const outEl = document.querySelector('#out');
+const previewEl = document.querySelector('#preview');
+const copyBtn = document.querySelector('#copyBtn');
+const selectBtn = document.querySelector('#selectBtn');
+
+function esc(s){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+function buildPrestoHTML(subject, items){
+  const heading = `More on ${esc(subject)}`;
+  let html = `
+<div class="hh-block">
+  <h2 style="font-family:Georgia,'Times New Roman',Times,serif;font-weight:700;font-size:20px;line-height:1.2;margin:0 0 12px;">${heading}</h2>
+  ${items.map(it => `
+    <p class="hh-item" style="border-left:4px solid #e31d1a;padding-left:12px;margin:12px 0;">
+      ${esc(it.snippet)} <a href="${it.url}" target="_blank" rel="noopener">via ${esc(it.source)}</a> / ${esc(it.date)}
+    </p>
+  `).join('\n')}
+</div>`.trim();
+  return html;
+}
+
+async function fetchRumors(q, mode){
+  const res = await fetch('/.netlify/functions/fetchRumors?q=' + encodeURIComponent(q) + '&mode=' + encodeURIComponent(mode));
+  if(!res.ok) throw new Error('Fetch failed: ' + res.status);
+  return await res.json();
+}
+
+function render(subject, items){
+  const html = buildPrestoHTML(subject, items);
+  outEl.textContent = html;
+  previewEl.innerHTML = html;
+  copyBtn.disabled = false;
+  selectBtn.disabled = false;
+}
+
+document.querySelector('#qform').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const q = document.querySelector('#q').value.trim();
+  const mode = document.querySelector('#mode').value;
+  if(!q) return;
+  statusEl.textContent = 'Fetching rumors…';
+  copyBtn.disabled = true; selectBtn.disabled = true;
+  outEl.textContent = ''; previewEl.innerHTML = '';
+  try {
+    const data = await fetchRumors(q, mode);
+    if(!data.items || !data.items.length){
+      statusEl.textContent = 'No recent rumors found.';
+      return;
+    }
+    statusEl.textContent = `Found ${data.items.length} item(s).`;
+    render(data.subject, data.items);
+  } catch(err){
+    console.error(err);
+    statusEl.textContent = 'Error: ' + err.message;
+  }
+});
+
+copyBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(outEl.textContent);
+    statusEl.textContent = 'Copied HTML to clipboard.';
+  } catch {
+    statusEl.textContent = 'Select the code and press Ctrl/Cmd+C.';
+  }
+});
+
+selectBtn.addEventListener('click', () => {
+  const range = document.createRange();
+  range.selectNodeContents(outEl);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+});
+</script>
+</body>
+</html>
