@@ -2,13 +2,13 @@
 import { JSDOM } from "jsdom";
 
 /**
- * Scrapes preview.hoopshype.com tag pages (HTML) and returns 5 items:
+ * Scrapes preview.hoopshype.com tag pages (HTML) and returns 8 items:
  * - Accepts q="Jalen Brunson, New York Knicks" (comma-separated subjects)
  * - For each subject, slug -> jalen_brunson, new_york_knicks
  * - Crawls up to 10 pages per tag
  * - Preserves paragraph HTML (so in-snippet links stay clickable)
  * - Uses last <a> as the source (name + href)
- * - Merges, de-dupes, sorts by date desc, SKIPS the most recent, returns next five
+ * - Merges, de-dupes, sorts by date desc, SKIPS the most recent, returns next EIGHT
  */
 
 const PREVIEW_ORIGIN = "http://preview.hoopshype.com"; // Basic Auth works reliably over http
@@ -55,11 +55,9 @@ async function fetchText(url) {
   return res.text();
 }
 
-// Extract sanitized innerHTML from a paragraph while preserving <a> tags
+// Keep anchor tags, strip all other markup to text
 function paragraphHTML(p) {
-  // keep only <a> tags; strip others
   const clone = p.cloneNode(true);
-  // Remove all attributes except href on <a>
   for (const el of clone.querySelectorAll("*")) {
     if (el.tagName.toLowerCase() === "a") {
       const href = el.getAttribute("href");
@@ -67,7 +65,6 @@ function paragraphHTML(p) {
       if (href) el.setAttribute("target","_blank");
       el.removeAttribute("rel");
     } else {
-      // unwrap non-anchors (replace element with its text content)
       const txt = el.textContent || "";
       el.replaceWith(clone.ownerDocument.createTextNode(txt));
     }
@@ -96,11 +93,9 @@ function parseTagPage(html, dbg) {
     const tag = el.tagName?.toLowerCase() || "";
     const text = clean(el.textContent || "");
 
-    // Any element containing a "Month DD, YYYY" sets the date
     const iso = extractISODate(text);
     if (iso) { currentDateISO = iso; continue; }
 
-    // Rumor blocks: <p> and <li>, only if we have a date set
     const isItemBlock = (tag === "p" || tag === "li");
     if (!isItemBlock || !currentDateISO) continue;
     if (!text || text.length < 15) continue;
@@ -113,14 +108,15 @@ function parseTagPage(html, dbg) {
     const htmlSnippet = paragraphHTML(el);
 
     out.push({
-      title: text,                  // plain text version (for keys)
-      snippet_html: htmlSnippet,    // keeps hyperlinks inside the paragraph
-      url,                          // source/link at the end of the paragraph
+      title: text,
+      snippet_html: htmlSnippet,
+      url,
       sourceName,
-      date: currentDateISO
+      date: currentDateISO,
+      lastAnchorText: clean(anchors.at(-1)?.textContent || "")
     });
 
-    if (out.length >= 80) break; // safety cap per page
+    if (out.length >= 80) break;
   }
 
   dbg.parsedItemsOnPage = (dbg.parsedItemsOnPage || 0) + out.length;
@@ -138,7 +134,7 @@ async function collectFromOneTag(slug, dbg) {
       html = await fetchText(url);
     } catch (e) {
       dbg[`page${page}Error_${slug}`] = String(e.message || e);
-      break; // no more pages
+      break;
     }
 
     const parsed = parseTagPage(html, dbg);
@@ -155,7 +151,6 @@ async function collectFromOneTag(slug, dbg) {
 }
 
 function fmtMonthAbbrev(dateStr){
-  // "YYYY-MM-DD" -> "Oct. 15, 2025" (with dot)
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr || "");
   if (!m) return "";
   const y = m[1], mon = parseInt(m[2],10), d = parseInt(m[3],10);
@@ -163,26 +158,34 @@ function fmtMonthAbbrev(dateStr){
   return `${names[mon-1]} ${d}, ${y}`;
 }
 
+// Decide if body already ends with the same outlet link/text → then omit source in footer
+function bodyAlreadyHasSource(item){
+  if (!item.url) return false;
+  const url = item.url.replace(/\/+$/,"");
+  const txt = item.snippet_html.trim();
+  // crude check: last anchor has same href OR same visible text at the end
+  const anchorEnd = /<a[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>\s*$/i.exec(txt);
+  if (!anchorEnd) return false;
+  const href = anchorEnd[1].replace(/\/+$/,"");
+  const label = clean(anchorEnd[2] || "");
+  return href === url || label.toLowerCase() === item.sourceName.toLowerCase();
+}
+
 export const handler = async (event) => {
   const qRaw = (event.queryStringParameters?.q || "").trim();
   const debug = event.queryStringParameters?.debug === "1";
   if (!qRaw) return json(400, { error: "Missing q" });
 
-  // Allow multiple subjects separated by commas; keep original for heading
   const subjects = qRaw.split(",").map(s => clean(s)).filter(Boolean);
   const slugs = subjects.map(slugify);
   const dbg = { subjects, slugs };
 
   try {
-    // Collect from all tags, merge
     let merged = [];
-    for (const slug of slugs) {
-      const part = await collectFromOneTag(slug, dbg);
-      merged = merged.concat(part);
-    }
+    for (const slug of slugs) merged = merged.concat(await collectFromOneTag(slug, dbg));
 
-    // Sort newest first, de-dupe across tags by (date+title+url)
     merged.sort((a,b) => (b.date||"") > (a.date||"") ? 1 : -1);
+
     const dedup = [];
     const seen = new Set();
     for (const it of merged) {
@@ -192,19 +195,23 @@ export const handler = async (event) => {
       dedup.push(it);
     }
 
-    // Skip the most recent, return next 5
-    const window = dedup.slice(1, 6);
+    // Skip newest (index 0), take next 8
+    const window = dedup.slice(1, 9);
 
-    // Map to final payload (including pretty date + source link)
+    // Map to final payload
     const items = window.map(it => ({
       date: it.date,
       date_pretty: fmtMonthAbbrev(it.date),
-      snippet_html: it.snippet_html,         // paragraph with inline links preserved
+      snippet_html: it.snippet_html,
       sourceName: it.sourceName,
-      sourceUrl: it.url
+      sourceUrl: it.url,
+      suppressSource: bodyAlreadyHasSource(it) // if true → don't render outlet again
     }));
 
-    return json(200, debug ? { subject: qRaw, items, debug: { ...dbg, totalMerged: merged.length, totalAfterDedup: dedup.length, returning: items.length } } : { subject: qRaw, items });
+    return json(200, debug
+      ? { subject: qRaw, items, debug: { ...dbg, totalMerged: merged.length, totalAfterDedup: dedup.length, returning: items.length } }
+      : { subject: qRaw, items }
+    );
   } catch (e) {
     return json(500, { error: e.message || "Unknown error", debug: dbg });
   }
