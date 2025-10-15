@@ -1,4 +1,4 @@
-// Uses Node 18+ global fetch (no extra fetch library needed)
+// netlify/functions/fetchRumors.js
 import { JSDOM } from "jsdom";
 
 const RUMORS_FEED = "https://hoopshype.com/category/rumors/feed/";
@@ -23,7 +23,7 @@ function toISO(dstr){
   const d = new Date(dstr);
   return isNaN(d) ? "" : d.toISOString().slice(0,10);
 }
-
+function clean(s){ return (s||"").replace(/\s+/g," ").trim(); }
 function escapeRegExp(str){ return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 function matchMode(subject, mode){
@@ -53,92 +53,103 @@ function normSource(text){
   return "HoopsHype";
 }
 
-function clean(s){ return (s||"").replace(/\s+/g,' ').trim(); }
-
 async function getFromRSS(query, mode){
-  const res = await fetch(RUMORS_FEED, { headers: { "user-agent": "Mozilla/5.0" }});
+  const res = await fetch(RUMORS_FEED, { headers: { "user-agent":"Mozilla/5.0" }});
   if(!res.ok) throw new Error("RSS not reachable");
   const xml = await res.text();
   const dom = new JSDOM(xml, { contentType: "text/xml" });
+
   const items = [...dom.window.document.querySelectorAll("item")].map(it => {
     const title = it.querySelector("title")?.textContent || "";
-    const link = it.querySelector("link")?.textContent || "";
-    const pubDate = it.querySelector("pubDate")?.textContent || "";
-    const desc = it.querySelector("description")?.textContent || "";
-    return { title, url: link, date: toISO(pubDate), raw: `${title} ${desc}` };
+    const link  = it.querySelector("link")?.textContent || "";
+    const pub   = it.querySelector("pubDate")?.textContent || "";
+    const desc  = it.querySelector("description")?.textContent || "";
+    return { title, url: link, date: toISO(pub), raw: `${title} ${desc}` };
   });
 
-  const matches = items.filter(x => matchMode(query, mode)(x.raw)).slice(0, 20);
-  const unique = [];
+  // quick prefilter using RSS text, then hydrate pages
+  const pre = items.filter(x => matchMode(query, mode)(x.raw)).slice(0, 20);
+  const out = [];
   const seen = new Set();
-  for(const m of matches){
-    if(seen.has(m.url)) continue;
-    seen.add(m.url);
-    unique.push(m);
-    if(unique.length >= 12) break;
-  }
-  const refined = [];
-  for (const it of unique) {
+
+  for (const it of pre) {
+    if (seen.has(it.url)) continue;
+    seen.add(it.url);
     try {
       const pg = await fetch(it.url, { headers:{ "user-agent":"Mozilla/5.0" }});
       const html = await pg.text();
       const d2 = new JSDOM(html);
       const doc = d2.window.document;
+      const art = doc.querySelector("article") || doc.body;
+      const bodyText = clean(art.textContent || "");
+      if (!matchMode(query, mode)(bodyText)) continue; // ensure match in full article
+
       const p = doc.querySelector("article p");
-      const metaDate = doc.querySelector("time[datetime]")?.getAttribute("datetime");
+      const dt = toISO(doc.querySelector("time[datetime]")?.getAttribute("datetime") || "");
       const snippet = p ? clean(p.textContent) : it.title;
-      const source = normSource(html) || normSource(it.title);
-      refined.push({ title: it.title, url: it.url, date: toISO(metaDate) || it.date || "", source, snippet });
+      const source  = normSource(html) || normSource(it.title);
+
+      out.push({ title: it.title, url: it.url, date: dt || it.date || "", source, snippet });
+      if (out.length >= 5) break;
     } catch {
-      refined.push({ title: it.title, url: it.url, date: it.date || "", source: "HoopsHype", snippet: it.title });
+      // ignore bad pages
     }
   }
-  refined.sort((a,b)=> (b.date||"") > (a.date||"") ? 1 : -1);
-  return refined.slice(0,5);
+
+  return out;
 }
 
 async function getFromIndex(query, mode){
+  // collect latest rumor links (don’t filter yet)
   const pages = [RUMORS_INDEX, RUMORS_INDEX + "page/2/", RUMORS_INDEX + "page/3/"];
-  const acc = [];
-  for(const url of pages){
+  const links = [];
+  const seen = new Set();
+
+  for (const url of pages){
     const res = await fetch(url, { headers:{ "user-agent":"Mozilla/5.0" }});
     if(!res.ok) continue;
     const html = await res.text();
     const dom = new JSDOM(html);
     const doc = dom.window.document;
-    const articles = [...doc.querySelectorAll("article")];
-    for(const a of articles){
-      const link = a.querySelector("a")?.href;
-      const title = a.querySelector("h2, h3")?.textContent || a.textContent || "";
-      if(!link) continue;
-      acc.push({ url: link, title });
+
+    for(const a of doc.querySelectorAll("article a")){
+      const href = a.getAttribute("href");
+      if(!href || seen.has(href)) continue;
+      seen.add(href);
+      links.push(href);
+      if(links.length >= 60) break;
     }
+    if(links.length >= 60) break;
   }
-  const filt = acc.filter(x => matchMode(query, mode)(x.title));
-  const unique = [];
-  const seen = new Set();
-  for(const f of filt){
-    if(seen.has(f.url)) continue;
-    seen.add(f.url);
-    unique.push(f);
-    if(unique.length >= 12) break;
-  }
+
+  // now hydrate each article and filter on FULL TEXT
   const out = [];
-  for (const it of unique) {
+  for (const url of links){
     try {
-      const pg = await fetch(it.url, { headers:{ "user-agent":"Mozilla/5.0" }});
+      const pg = await fetch(url, { headers:{ "user-agent":"Mozilla/5.0" }});
+      if(!pg.ok) continue;
       const html = await pg.text();
       const d2 = new JSDOM(html);
       const doc = d2.window.document;
-      const p = doc.querySelector("article p");
-      const metaDate = doc.querySelector("time[datetime]")?.getAttribute("datetime");
-      const snippet = p ? clean(p.textContent) : it.title;
-      const source = normSource(html) || normSource(it.title);
-      out.push({ title: it.title, url: it.url, date: toISO(metaDate) || "", source, snippet });
+
+      const article = doc.querySelector("article") || doc.body;
+      const bodyText = clean(article.textContent || "");
+      if(!matchMode(query, mode)(bodyText)) continue;
+
+      const title   = clean(doc.querySelector("h1, h2")?.textContent || "");
+      const p       = doc.querySelector("article p");
+      const snippet = p ? clean(p.textContent) : title;
+      const dateIso = toISO(doc.querySelector("time[datetime]")?.getAttribute("datetime") || "");
+      const source  = normSource(html) || normSource(title);
+
+      out.push({ title, url, date: dateIso, source, snippet });
+      if (out.length >= 5) break;
     } catch {
-      out.push({ title: it.title, url: it.url, date: "", source:"HoopsHype", snippet: it.title });
+      // ignore failed pages
     }
   }
+
+  // newest first
   out.sort((a,b)=> (b.date||"") > (a.date||"") ? 1 : -1);
   return out.slice(0,5);
 }
@@ -147,13 +158,16 @@ export const handler = async (event) => {
   const q = (event.queryStringParameters?.q || "").trim();
   const mode = (event.queryStringParameters?.mode || "player").toLowerCase();
   if(!q) return json(400, { error:"Missing q" });
+
   try {
     let items = [];
     try {
       items = await getFromRSS(q, mode);
     } catch {
-      items = await getFromIndex(q, mode);
+      // ignore, use index fallback
     }
+    if (!items.length) items = await getFromIndex(q, mode);
+
     return json(200, { subject:q, items });
   } catch (e) {
     return json(500, { error: e.message || "Unknown error" });
