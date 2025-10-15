@@ -1,9 +1,13 @@
 // netlify/functions/fetchRumors.js
 import { JSDOM } from "jsdom";
 
+// --- SOURCES (try in this order) ---
+const SEARCH_RSS = (q) => `https://hoopshype.com/?s=${encodeURIComponent(q)}&feed=rss2`;
+const SEARCH_HTML = (q) => `https://hoopshype.com/?s=${encodeURIComponent(q)}`;
 const RUMORS_FEED = "https://hoopshype.com/category/rumors/feed/";
 const RUMORS_INDEX = "https://hoopshype.com/rumors/";
 
+// --- TEAM ALIASES (extend as needed) ---
 const TEAM_ALIASES = {
   lakers: ["los angeles lakers", "lal", "lakers"],
   clippers: ["los angeles clippers", "lac", "clippers"],
@@ -19,161 +23,257 @@ const TEAM_ALIASES = {
   thunder: ["oklahoma city thunder", "okc", "thunder"],
 };
 
-function toISO(dstr){
-  const d = new Date(dstr);
-  return isNaN(d) ? "" : d.toISOString().slice(0,10);
-}
-function clean(s){ return (s||"").replace(/\s+/g," ").trim(); }
-function escapeRegExp(str){ return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+const UA = {
+  headers: {
+    "user-agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+    "accept-language": "en-US,en;q=0.9",
+  },
+};
 
-function matchMode(subject, mode){
+function toISO(dstr) {
+  const d = new Date(dstr);
+  return isNaN(d) ? "" : d.toISOString().slice(0, 10);
+}
+function clean(s) { return (s || "").replace(/\s+/g, " ").trim(); }
+function escapeRegExp(str) { return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+function buildMatcher(subject, mode) {
   const s = subject.toLowerCase().trim();
-  if(mode === "team"){
-    const key = s.replace(/[^a-z]/g,'');
+  if (mode === "team") {
+    const key = s.replace(/[^a-z]/g, "");
     const aliases = TEAM_ALIASES[key] || [s];
     return (txt) => {
       const t = txt.toLowerCase();
-      return aliases.some(a => t.includes(a));
+      return aliases.some((a) => t.includes(a));
     };
   }
-  if(mode === "player"){
+  if (mode === "player") {
     const parts = s.split(/\s+/);
-    const last = parts[parts.length-1];
-    const re = new RegExp(`\\b(${parts.map(p=>escapeRegExp(p)).join("|")}|${escapeRegExp(last)})\\b`, "i");
+    const last = parts[parts.length - 1];
+    const re = new RegExp(
+      `\\b(${parts.map((p) => escapeRegExp(p)).join("|")}|${escapeRegExp(last)})\\b`,
+      "i"
+    );
     return (txt) => re.test(txt);
   }
   return (txt) => txt.toLowerCase().includes(s);
 }
 
-function normSource(text){
+function sourceFrom(text) {
   const via = /via\s+([A-Z][A-Za-z0-9 .'-]+)/i.exec(text);
-  if(via) return via[1].trim();
-  const dash = /[-–]\s*([A-Z][A-Za-z0-9 .'-]+)$/.exec(text.trim());
-  if(dash) return dash[1].trim();
+  if (via) return via[1].trim();
+  const dash = /[-–]\s*([A-Z][A-Za-z0-9 .'-]+)\s*$/i.exec(text.trim());
+  if (dash) return dash[1].trim();
   return "HoopsHype";
 }
 
-async function getFromRSS(query, mode){
-  const res = await fetch(RUMORS_FEED, { headers: { "user-agent":"Mozilla/5.0" }});
-  if(!res.ok) throw new Error("RSS not reachable");
-  const xml = await res.text();
-  const dom = new JSDOM(xml, { contentType: "text/xml" });
+// ----------- FETCH HELPERS -----------
+async function fetchText(url) {
+  const res = await fetch(url, UA);
+  if (!res.ok) throw new Error(`Fetch ${res.status} ${url}`);
+  return res.text();
+}
 
-  const items = [...dom.window.document.querySelectorAll("item")].map(it => {
-    const title = it.querySelector("title")?.textContent || "";
-    const link  = it.querySelector("link")?.textContent || "";
-    const pub   = it.querySelector("pubDate")?.textContent || "";
-    const desc  = it.querySelector("description")?.textContent || "";
-    return { title, url: link, date: toISO(pub), raw: `${title} ${desc}` };
-  });
+// 1) WordPress site search RSS (already filtered by query)
+async function fromSearchRSS(q, matcher, dbg) {
+  try {
+    const xml = await fetchText(SEARCH_RSS(q));
+    const dom = new JSDOM(xml, { contentType: "text/xml" });
+    const items = [...dom.window.document.querySelectorAll("item")].map((it) => ({
+      title: it.querySelector("title")?.textContent || "",
+      url: it.querySelector("link")?.textContent || "",
+      date: toISO(it.querySelector("pubDate")?.textContent || ""),
+      desc: it.querySelector("description")?.textContent || "",
+    }));
 
-  // quick prefilter using RSS text, then hydrate pages
-  const pre = items.filter(x => matchMode(query, mode)(x.raw)).slice(0, 20);
-  const out = [];
-  const seen = new Set();
+    // Prefer Rumors posts only, newest first
+    const candidates = items
+      .filter((x) => (x.url || "").includes("/rumors/"))
+      .sort((a, b) => (b.date || "") > (a.date || "") ? 1 : -1);
 
-  for (const it of pre) {
-    if (seen.has(it.url)) continue;
-    seen.add(it.url);
-    try {
-      const pg = await fetch(it.url, { headers:{ "user-agent":"Mozilla/5.0" }});
-      const html = await pg.text();
+    dbg.rssCount = items.length;
+    dbg.rssRumorsCount = candidates.length;
+
+    const out = [];
+    for (const it of candidates) {
+      if (!it.url) continue;
+      const html = await fetchText(it.url);
       const d2 = new JSDOM(html);
       const doc = d2.window.document;
-      const art = doc.querySelector("article") || doc.body;
-      const bodyText = clean(art.textContent || "");
-      if (!matchMode(query, mode)(bodyText)) continue; // ensure match in full article
+      const article = doc.querySelector("article") || doc.body;
+      const body = clean(article.textContent || "");
+      if (!matcher(body + " " + it.title + " " + it.desc)) continue;
 
       const p = doc.querySelector("article p");
-      const dt = toISO(doc.querySelector("time[datetime]")?.getAttribute("datetime") || "");
-      const snippet = p ? clean(p.textContent) : it.title;
-      const source  = normSource(html) || normSource(it.title);
+      const snippet = clean(p ? p.textContent : it.title);
+      const meta = toISO(doc.querySelector("time[datetime]")?.getAttribute("datetime") || it.date);
+      const src = sourceFrom(html) || sourceFrom(it.title);
 
-      out.push({ title: it.title, url: it.url, date: dt || it.date || "", source, snippet });
+      out.push({ title: clean(it.title), url: it.url, date: meta, source: src, snippet });
       if (out.length >= 5) break;
-    } catch {
-      // ignore bad pages
     }
+    return out;
+  } catch {
+    return [];
   }
-
-  return out;
 }
 
-async function getFromIndex(query, mode){
-  // collect latest rumor links (don’t filter yet)
-  const pages = [RUMORS_INDEX, RUMORS_INDEX + "page/2/", RUMORS_INDEX + "page/3/"];
-  const links = [];
-  const seen = new Set();
-
-  for (const url of pages){
-    const res = await fetch(url, { headers:{ "user-agent":"Mozilla/5.0" }});
-    if(!res.ok) continue;
-    const html = await res.text();
+// 2) Site search HTML (collect links → hydrate → filter)
+async function fromSearchHTML(q, matcher, dbg) {
+  try {
+    const html = await fetchText(SEARCH_HTML(q));
     const dom = new JSDOM(html);
     const doc = dom.window.document;
+    const links = [...doc.querySelectorAll("a")]
+      .map((a) => a.getAttribute("href"))
+      .filter((u) => u && u.includes("/rumors/"));
 
-    for(const a of doc.querySelectorAll("article a")){
-      const href = a.getAttribute("href");
-      if(!href || seen.has(href)) continue;
-      seen.add(href);
-      links.push(href);
-      if(links.length >= 60) break;
+    dbg.searchLinks = links.length;
+
+    const seen = new Set();
+    const out = [];
+    for (const url of links) {
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      try {
+        const page = await fetchText(url);
+        const d2 = new JSDOM(page);
+        const article = d2.window.document.querySelector("article") || d2.window.document.body;
+        const body = clean(article.textContent || "");
+        if (!matcher(body)) continue;
+
+        const titleEl = d2.window.document.querySelector("h1, h2");
+        const title = clean(titleEl?.textContent || "");
+        const p = d2.window.document.querySelector("article p");
+        const snippet = clean(p ? p.textContent : title);
+        const dateIso = toISO(d2.window.document.querySelector("time[datetime]")?.getAttribute("datetime") || "");
+        const src = sourceFrom(page) || sourceFrom(title);
+
+        out.push({ title, url, date: dateIso, source: src, snippet });
+        if (out.length >= 5) break;
+      } catch {
+        // ignore
+      }
     }
-    if(links.length >= 60) break;
+    // newest first
+    out.sort((a, b) => (b.date || "") > (a.date || "") ? 1 : -1);
+    return out.slice(0, 5);
+  } catch {
+    return [];
   }
-
-  // now hydrate each article and filter on FULL TEXT
-  const out = [];
-  for (const url of links){
-    try {
-      const pg = await fetch(url, { headers:{ "user-agent":"Mozilla/5.0" }});
-      if(!pg.ok) continue;
-      const html = await pg.text();
-      const d2 = new JSDOM(html);
-      const doc = d2.window.document;
-
-      const article = doc.querySelector("article") || doc.body;
-      const bodyText = clean(article.textContent || "");
-      if(!matchMode(query, mode)(bodyText)) continue;
-
-      const title   = clean(doc.querySelector("h1, h2")?.textContent || "");
-      const p       = doc.querySelector("article p");
-      const snippet = p ? clean(p.textContent) : title;
-      const dateIso = toISO(doc.querySelector("time[datetime]")?.getAttribute("datetime") || "");
-      const source  = normSource(html) || normSource(title);
-
-      out.push({ title, url, date: dateIso, source, snippet });
-      if (out.length >= 5) break;
-    } catch {
-      // ignore failed pages
-    }
-  }
-
-  // newest first
-  out.sort((a,b)=> (b.date||"") > (a.date||"") ? 1 : -1);
-  return out.slice(0,5);
 }
 
+// 3) Fallbacks: Rumors feed / index (broad)
+async function fromRumorsFeed(q, matcher, dbg) {
+  try {
+    const xml = await fetchText(RUMORS_FEED);
+    const dom = new JSDOM(xml, { contentType: "text/xml" });
+    const items = [...dom.window.document.querySelectorAll("item")].map((it) => ({
+      title: it.querySelector("title")?.textContent || "",
+      url: it.querySelector("link")?.textContent || "",
+      date: toISO(it.querySelector("pubDate")?.textContent || ""),
+      desc: it.querySelector("description")?.textContent || "",
+    }));
+    dbg.rumorsFeedCount = items.length;
+
+    const out = [];
+    for (const it of items) {
+      if (!it.url) continue;
+      try {
+        const html = await fetchText(it.url);
+        const d2 = new JSDOM(html);
+        const article = d2.window.document.querySelector("article") || d2.window.document.body;
+        const body = clean(article.textContent || "");
+        if (!matcher(body + " " + it.title + " " + it.desc)) continue;
+
+        const p = d2.window.document.querySelector("article p");
+        const snippet = clean(p ? p.textContent : it.title);
+        const dt = toISO(d2.window.document.querySelector("time[datetime]")?.getAttribute("datetime") || it.date);
+        const src = sourceFrom(html) || sourceFrom(it.title);
+
+        out.push({ title: clean(it.title), url: it.url, date: dt, source: src, snippet });
+        if (out.length >= 5) break;
+      } catch {
+        // ignore
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+async function fromRumorsIndex(q, matcher, dbg) {
+  try {
+    const pages = [RUMORS_INDEX, RUMORS_INDEX + "page/2/", RUMORS_INDEX + "page/3/"];
+    const links = [];
+    const seen = new Set();
+    for (const u of pages) {
+      const html = await fetchText(u);
+      const dom = new JSDOM(html);
+      const doc = dom.window.document;
+      for (const a of doc.querySelectorAll("article a")) {
+        const href = a.getAttribute("href");
+        if (!href || seen.has(href)) continue;
+        seen.add(href);
+        links.push(href);
+        if (links.length >= 80) break;
+      }
+    }
+    dbg.indexLinks = links.length;
+
+    const out = [];
+    for (const url of links) {
+      try {
+        const html = await fetchText(url);
+        const d2 = new JSDOM(html);
+        const doc = d2.window.document;
+        const article = doc.querySelector("article") || doc.body;
+        const body = clean(article.textContent || "");
+        if (!matcher(body)) continue;
+
+        const title = clean(doc.querySelector("h1, h2")?.textContent || "");
+        const p = doc.querySelector("article p");
+        const snippet = clean(p ? p.textContent : title);
+        const dateIso = toISO(doc.querySelector("time[datetime]")?.getAttribute("datetime") || "");
+        const src = sourceFrom(html) || sourceFrom(title);
+
+        out.push({ title, url, date: dateIso, source: src, snippet });
+        if (out.length >= 5) break;
+      } catch {
+        // ignore
+      }
+    }
+    out.sort((a, b) => (b.date || "") > (a.date || "") ? 1 : -1);
+    return out.slice(0, 5);
+  } catch {
+    return [];
+  }
+}
+
+// ----------- HANDLER -----------
 export const handler = async (event) => {
   const q = (event.queryStringParameters?.q || "").trim();
   const mode = (event.queryStringParameters?.mode || "player").toLowerCase();
-  if(!q) return json(400, { error:"Missing q" });
+  const debug = event.queryStringParameters?.debug === "1";
+  if (!q) return json(400, { error: "Missing q" });
 
-  try {
-    let items = [];
-    try {
-      items = await getFromRSS(q, mode);
-    } catch {
-      // ignore, use index fallback
-    }
-    if (!items.length) items = await getFromIndex(q, mode);
+  const matcher = buildMatcher(q, mode);
+  const dbg = {};
 
-    return json(200, { subject:q, items });
-  } catch (e) {
-    return json(500, { error: e.message || "Unknown error" });
-  }
+  let items = await fromSearchRSS(q, matcher, dbg);
+  if (!items.length) items = await fromSearchHTML(q, matcher, dbg);
+  if (!items.length) items = await fromRumorsFeed(q, matcher, dbg);
+  if (!items.length) items = await fromRumorsIndex(q, matcher, dbg);
+
+  return json(200, debug ? { subject: q, items, debug: dbg } : { subject: q, items });
 };
 
-function json(code, body){
-  return { statusCode: code, headers: { "Content-Type":"application/json" }, body: JSON.stringify(body) };
+function json(code, body) {
+  return {
+    statusCode: code,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  };
 }
