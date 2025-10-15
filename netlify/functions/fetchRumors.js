@@ -2,22 +2,17 @@
 import { JSDOM } from "jsdom";
 
 /**
- * Scrapes preview.hoopshype.com tag pages (HTML) and returns the 5 most recent rumors
- * for a player or team, even if they were posted days/weeks ago.
+ * Scrapes preview.hoopshype.com tag pages (HTML) and returns the 5 most recent rumors.
+ * Works even if date headers aren't <h2>/<h3>; any element with "Month DD, YYYY" sets the date.
  *
- * Example tag:
- *   http://preview.hoopshype.com/rumors/tag/jalen_brunson/
- *
- * Query:
- *   q=Jalen%20Brunson     -> slug jalen_brunson
- *   debug=1               -> include debug info
+ * Query:  q=Jalen%20Brunson   (slug -> jalen_brunson)
+ *         debug=1             (include debug info)
  */
 
 const PREVIEW_ORIGIN = "http://preview.hoopshype.com"; // HTTP works with Basic Auth
 
 function b64(s) { return Buffer.from(s).toString("base64"); }
 function getAuthHeader() {
-  // Set PREVIEW_BASIC_AUTH = "preview:hhpreview" in Netlify
   const pair = process.env.PREVIEW_BASIC_AUTH || "preview:hhpreview";
   return "Basic " + b64(pair);
 }
@@ -40,18 +35,16 @@ function slugify(q){
     .replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"");
 }
 
-// Parse "Month DD, YYYY" from heading text → "YYYY-MM-DD"
-function toISOFromHeading(h) {
-  const m = /([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4})/i.exec(h || "");
+// Parse "Month DD, YYYY" from any text → "YYYY-MM-DD"
+const MONTHS = {january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12};
+function extractISODate(txt){
+  const m = /([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4})/.exec(txt || "");
   if (!m) return "";
-  const months = {
-    january:1,february:2,march:3,april:4,may:5,june:6,
-    july:7,august:8,september:9,october:10,november:11,december:12
-  };
-  const mm = months[m[1].toLowerCase()];
+  const mm = MONTHS[m[1].toLowerCase()];
+  if (!mm) return "";
   const dd = String(parseInt(m[2],10)).padStart(2,"0");
   const yy = m[3];
-  return mm ? `${yy}-${String(mm).padStart(2,"0")}-${dd}` : "";
+  return `${yy}-${String(mm).padStart(2,"0")}-${dd}`;
 }
 
 async function fetchText(url) {
@@ -61,10 +54,10 @@ async function fetchText(url) {
 }
 
 /**
- * Parse a tag page:
- * - Any H2/H3 with "Month DD, YYYY" starts a date section (no need for “Updates”).
- * - Each following <p> becomes a rumor item until the next date heading.
- * - Last <a> in the <p> is used as source+url.
+ * Parse one tag page:
+ * - Walk *all* elements in content area; any element whose text matches a date sets currentDateISO.
+ * - Treat <p> and <li> as rumor items (if we have a current date).
+ * - Use the last <a> inside the item block as source + url.
  */
 function parseTagPage(html, dbg) {
   const dom = new JSDOM(html);
@@ -74,42 +67,43 @@ function parseTagPage(html, dbg) {
     doc.querySelector("main") ||
     doc.querySelector("#content") ||
     doc.querySelector(".content") ||
+    doc.querySelector(".container") ||
     doc.body;
 
   const out = [];
   let currentDateISO = "";
 
-  const blocks = [...container.querySelectorAll("h1, h2, h3, p, div, article, section, ul, ol")];
+  const nodes = [...container.querySelectorAll("*")];
+  dbg.scannedNodes = (dbg.scannedNodes || 0) + nodes.length;
 
-  for (const el of blocks) {
-    const tag = el.tagName.toLowerCase();
+  for (const el of nodes) {
+    const tag = el.tagName?.toLowerCase() || "";
+    const text = clean(el.textContent || "");
 
-    // Date heading (any H2/H3 that contains a valid date string)
-    if (tag === "h2" || tag === "h3") {
-      const iso = toISOFromHeading(el.textContent || "");
-      if (iso) { currentDateISO = iso; continue; }
-    }
+    // Set date when any element contains a Month DD, YYYY string
+    const iso = extractISODate(text);
+    if (iso) { currentDateISO = iso; continue; }
 
-    // Rumor item paragraph under a known date
-    if (tag === "p" && currentDateISO) {
-      const text = clean(el.textContent || "");
-      if (!text || text.length < 15) continue;
+    // Candidate rumor blocks
+    const isItemBlock = (tag === "p" || tag === "li");
+    if (!isItemBlock || !currentDateISO) continue;
 
-      const anchors = [...el.querySelectorAll("a")];
-      const lastA = anchors[anchors.length - 1];
-      const url = lastA?.getAttribute("href") || "";
-      const source = clean(lastA?.textContent || "") || "HoopsHype";
+    if (!text || text.length < 15) continue; // skip very short items
 
-      out.push({
-        title: text,
-        url,
-        date: currentDateISO,
-        source,
-        snippet: text
-      });
+    const anchors = [...el.querySelectorAll("a")];
+    const lastA = anchors[anchors.length - 1];
+    const url = lastA?.getAttribute("href") || "";
+    const source = clean(lastA?.textContent || "") || "HoopsHype";
 
-      if (out.length >= 60) break; // safety cap per page
-    }
+    out.push({
+      title: text,
+      url,
+      date: currentDateISO,
+      source,
+      snippet: text
+    });
+
+    if (out.length >= 80) break; // safety
   }
 
   dbg.parsedItemsOnPage = (dbg.parsedItemsOnPage || 0) + out.length;
@@ -120,7 +114,7 @@ async function collectFromTag(slug, dbg) {
   const collected = [];
   const seen = new Set();
 
-  // Look back up to 10 pages to find recent items (weeks/month).
+  // Look back up to 10 pages
   for (let page = 1; page <= 10; page++) {
     const url = PREVIEW_ORIGIN + `/rumors/tag/${encodeURIComponent(slug)}/` + (page > 1 ? `page/${page}/` : "");
     let html = "";
@@ -128,7 +122,7 @@ async function collectFromTag(slug, dbg) {
       html = await fetchText(url);
     } catch (e) {
       dbg[`page${page}Error`] = String(e.message || e);
-      break; // stop if page missing
+      break; // no more pages
     }
 
     const items = parseTagPage(html, dbg);
@@ -140,14 +134,12 @@ async function collectFromTag(slug, dbg) {
       collected.push(it);
     }
 
-    // If we already have way more than we need, stop crawling
-    if (collected.length >= 120) break;
+    if (collected.length >= 150) break;
   }
 
-  // Ensure newest first by date
+  // Sort strictly by date (newest first)
   collected.sort((a,b) => (b.date||"") > (a.date||"") ? 1 : -1);
 
-  // Return the 5 newest with a link
   const top5 = collected.filter(x => x.url).slice(0,5);
   dbg.totalCollected = collected.length;
   dbg.returning = top5.length;
@@ -177,3 +169,4 @@ function json(code, body) {
     body: JSON.stringify(body),
   };
 }
+
