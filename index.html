@@ -19,17 +19,18 @@
     .hh-block h2 { font: 700 20px/1.2 Georgia, 'Times New Roman', Times, serif; margin:0 0 12px; }
     .hh-item { border-left:4px solid var(--accent); padding-left:12px; margin:12px 0; }
     .hh-item a { color: var(--link); text-decoration: underline; }
+    .footer { white-space:nowrap; }
   </style>
 </head>
 <body>
   <h1>HoopsHype Rumors → Presto Block</h1>
 
   <form id="qform">
-    <input id="q" type="text" placeholder="Player or Team (e.g., Jalen Brunson, Lakers)" required />
+    <input id="q" type="text" placeholder="Player or Team — use commas for multiple (e.g., Jalen Brunson, New York Knicks)" required />
     <select id="mode" title="Search mode">
+      <option value="any">Any mention</option>
       <option value="player">Player</option>
       <option value="team">Team</option>
-      <option value="any">Any mention</option>
     </select>
     <button class="primary" type="submit">Generate</button>
     <button type="button" id="copyBtn" disabled>Copy HTML</button>
@@ -54,22 +55,33 @@ const selectBtn = document.querySelector('#selectBtn');
 
 function esc(s){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
-function buildPrestoHTML(subject, items){
-  const heading = `More on ${esc(subject)}`;
-  let html = `
-<div class="hh-block">
-  <h2 style="font-family:Georgia,'Times New Roman',Times,serif;font-weight:700;font-size:20px;line-height:1.2;margin:0 0 12px;">${heading}</h2>
-  ${items.map(it => `
-    <p class="hh-item" style="border-left:4px solid #e31d1a;padding-left:12px;margin:12px 0;">
-      ${esc(it.snippet)} <a href="${it.url}" target="_blank" rel="noopener">via ${esc(it.source)}</a> / ${esc(it.date)}
-    </p>
-  `).join('\n')}
-</div>`.trim();
-  return html;
+// Format footer: "– <Source (linked)> | Oct. 15, 2025"
+function buildFooterHTML(sourceName, sourceUrl, datePretty) {
+  const src = sourceUrl ? `<a href="${sourceUrl}" target="_blank" rel="noopener">${esc(sourceName || 'Source')}</a>` : esc(sourceName || 'Source');
+  return ` &ndash; <span class="footer">${src} | ${esc(datePretty || '')}</span>`;
 }
 
-async function fetchRumors(q, mode){
-  const res = await fetch('/.netlify/functions/fetchRumors?q=' + encodeURIComponent(q) + '&mode=' + encodeURIComponent(mode));
+function buildPrestoHTML(subject, items){
+  const heading = `More on ${esc(subject)}`;
+  const paras = items.map(it => {
+    const body = it.snippet_html || '';
+    const footer = buildFooterHTML(it.sourceName, it.sourceUrl, it.date_pretty);
+    return `
+      <p class="hh-item" style="border-left:4px solid #e31d1a;padding-left:12px;margin:12px 0;">
+        ${body}${footer}
+      </p>
+    `.trim();
+  }).join('\n');
+
+  return `
+<div class="hh-block">
+  <h2 style="font-family:Georgia,'Times New Roman',Times,serif;font-weight:700;font-size:20px;line-height:1.2;margin:0 0 12px;">${heading}</h2>
+  ${paras}
+</div>`.trim();
+}
+
+async function fetchRumors(q){
+  const res = await fetch('/.netlify/functions/fetchRumors?q=' + encodeURIComponent(q) + '&debug=0');
   if(!res.ok) throw new Error('Fetch failed: ' + res.status);
   return await res.json();
 }
@@ -85,18 +97,18 @@ function render(subject, items){
 document.querySelector('#qform').addEventListener('submit', async (e) => {
   e.preventDefault();
   const q = document.querySelector('#q').value.trim();
-  const mode = document.querySelector('#mode').value;
+  // We ignore the dropdown now; multi-subject is supported by comma input
   if(!q) return;
   statusEl.textContent = 'Fetching rumors…';
   copyBtn.disabled = true; selectBtn.disabled = true;
   outEl.textContent = ''; previewEl.innerHTML = '';
   try {
-    const data = await fetchRumors(q, mode);
+    const data = await fetchRumors(q);
     if(!data.items || !data.items.length){
-      statusEl.textContent = 'No recent rumors found.';
+      statusEl.textContent = 'No rumors found in the last few months for that input.';
       return;
     }
-    statusEl.textContent = `Found ${data.items.length} item(s).`;
+    statusEl.textContent = `Found ${data.items.length} item(s). Skipped the most recent.`;
     render(data.subject, data.items);
   } catch(err){
     console.error(err);
