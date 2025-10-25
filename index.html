@@ -27,7 +27,7 @@
   <form id="qform">
     <input id="q" type="text" placeholder="Player or Team — use commas for multiple (e.g., Jalen Brunson, New York Knicks)" required />
     <button class="primary" type="submit">Generate</button>
-    <button type="button" id="copyBtn" disabled>Copy HTML</button>
+    <button type="button" id="copyBtn" disabled>Copy Block HTML</button>
   </form>
 
   <div id="status"></div>
@@ -137,12 +137,14 @@ copyBtn.addEventListener('click', async () => {
 });
 
 // Select the rendered block for manual copy
-selectBtn.addEventListener('click', () => {
-  const range = document.createRange();
-  range.selectNode(previewEl);
-  const sel = window.getSelection();
-  sel.removeAllRanges();
-  sel.addRange(range);
+selectBtn.addEventListener('click', async () => {
+  const html = previewEl.innerHTML.trim();
+  try {
+    await navigator.clipboard.writeText(html);
+    statusEl.textContent = 'Copied block HTML to clipboard.';
+  } catch {
+    statusEl.textContent = 'Select the block and press Ctrl/Cmd+C.';
+  }
 });
 </script>
 </body>
